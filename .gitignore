@@ -1,0 +1,26 @@
+# binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go build cache
+/bin/
+dist/
+tmp/
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+
+# Logs / local data
+*.log
+static
+static/objects/
+static/downloads/
+static/uploads

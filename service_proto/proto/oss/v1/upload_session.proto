@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package oss.v1;
+
+option go_package = "github.com/aureate7/mini-oss/service_proto/pb/oss/v1;ossv1";
+
+import "google/protobuf/timestamp.proto";
+
+enum UploadSessionStatus {
+  UPLOAD_SESSION_STATUS_UNSPECIFIED = 0;
+  UPLOAD_SESSION_STATUS_UPLOADING   = 1;
+  UPLOAD_SESSION_STATUS_COMPLETED   = 2;
+  UPLOAD_SESSION_STATUS_ABORTED     = 3;
+}
+
+message UploadSession {
+  string object_id = 1;
+  string upload_id = 2;
+  uint64 file_size = 3;
+  uint32 chunk_size = 4;
+  uint64 offset = 5;
+  UploadSessionStatus status = 6;
+
+  string sha256 = 7; // 幂等匹配
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  google.protobuf.Timestamp expires_at = 10;
+}
+
+
+message CreateUploadSessionRequest {
+  string idempotency_key = 1;
+  string object_id = 2;
+  uint64 file_size = 3;
+  uint32  preferred_chunk = 4;
+
+  string sha256 = 5; // 幂等性校验
+}
+
+message GetUploadSessionRequest {
+  string upload_id = 1;
+//  string idempotency_key = 2;
+}
+message CreateUploadSessionResponse {
+  UploadSession session = 1;
+  bool reused = 2;
+}
+
+message GetUploadSessionResponse {
+  UploadSession session = 1;
+}
+
+service UploadSessionService {
+  rpc CreateUploadSession (CreateUploadSessionRequest) returns (CreateUploadSessionResponse){}
+  rpc GetUploadSession (GetUploadSessionRequest) returns (GetUploadSessionResponse){}
+}

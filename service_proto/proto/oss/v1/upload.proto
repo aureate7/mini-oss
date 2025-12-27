@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package oss.v1;
+
+option go_package = "github.com/aureate7/mini-oss/service_proto/pb/oss/v1;ossv1";
+
+import "google/protobuf/timestamp.proto";
+
+message UploadChunk {
+  string upload_id = 1;
+  uint64 offset = 2;
+  bytes payload = 3;
+
+  uint32 checksum32 = 4; // 检验片段
+
+  bool is_last = 5; // 是否最后一块chunk
+}
+
+message UploadFileResult {
+  string object_id = 1;
+  string upload_id = 2;
+  uint64 size = 3;
+  string sha256 = 4; // 最终文件校验
+  google.protobuf.Timestamp completed_at = 5;
+}
+
+service UploadService {
+  // 客户端流式上传: 不断发chunk，服务端最后一次性返回结果
+  rpc Upload (stream UploadChunk) returns (UploadFileResult){}
+}

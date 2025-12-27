@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package oss.v1;
+option go_package = "github.com/aureate7/mini-oss/service_proto/pb/oss/v1;ossv1";
+
+message DownloadRequest {
+  string object_id = 1;
+
+  // Range: 起始offset(包含)
+  uint64 start_offset = 2;
+
+  // 结束 offset(可选，包含/不包含需要统一规定)
+  // recommend: end_offset为包含式或半开区间二选一，下面按半开区间写
+  uint64 end_offset = 3;
+  bool has_end = 4;
+
+  // 建议的chunk大小(服务端可忽略或裁剪)
+  uint32 preferred_chunk_size = 5;
+}
+
+message FileChunk {
+  bytes payload = 1;
+  uint64 offset = 2; // 这块payload对应文件的起始offset(便于校验/断点)
+}
+
+service DownloadService {
+  rpc Download(DownloadRequest) returns (stream FileChunk){}
+}
