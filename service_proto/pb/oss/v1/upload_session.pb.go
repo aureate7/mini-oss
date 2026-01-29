@@ -78,14 +78,15 @@ type UploadSession struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ObjectId      string                 `protobuf:"bytes,1,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
 	UploadId      string                 `protobuf:"bytes,2,opt,name=upload_id,json=uploadId,proto3" json:"upload_id,omitempty"`
-	FileSize      uint64                 `protobuf:"varint,3,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
-	ChunkSize     uint32                 `protobuf:"varint,4,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
-	Offset        uint64                 `protobuf:"varint,5,opt,name=offset,proto3" json:"offset,omitempty"`
-	Status        UploadSessionStatus    `protobuf:"varint,6,opt,name=status,proto3,enum=oss.v1.UploadSessionStatus" json:"status,omitempty"`
-	Sha256        string                 `protobuf:"bytes,7,opt,name=sha256,proto3" json:"sha256,omitempty"` // 幂等匹配
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	FileName      string                 `protobuf:"bytes,3,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
+	FileSize      uint64                 `protobuf:"varint,4,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
+	ChunkSize     uint32                 `protobuf:"varint,5,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
+	Offset        uint64                 `protobuf:"varint,6,opt,name=offset,proto3" json:"offset,omitempty"`
+	Status        UploadSessionStatus    `protobuf:"varint,7,opt,name=status,proto3,enum=oss.v1.UploadSessionStatus" json:"status,omitempty"`
+	Sha256        string                 `protobuf:"bytes,8,opt,name=sha256,proto3" json:"sha256,omitempty"` // 幂等匹配
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -130,6 +131,13 @@ func (x *UploadSession) GetObjectId() string {
 func (x *UploadSession) GetUploadId() string {
 	if x != nil {
 		return x.UploadId
+	}
+	return ""
+}
+
+func (x *UploadSession) GetFileName() string {
+	if x != nil {
+		return x.FileName
 	}
 	return ""
 }
@@ -194,9 +202,10 @@ type CreateUploadSessionRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	IdempotencyKey string                 `protobuf:"bytes,1,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	ObjectId       string                 `protobuf:"bytes,2,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
-	FileSize       uint64                 `protobuf:"varint,3,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
-	PreferredChunk uint32                 `protobuf:"varint,4,opt,name=preferred_chunk,json=preferredChunk,proto3" json:"preferred_chunk,omitempty"`
-	Sha256         string                 `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"` // 幂等性校验
+	FileName       string                 `protobuf:"bytes,3,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
+	FileSize       uint64                 `protobuf:"varint,4,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
+	PreferredChunk uint32                 `protobuf:"varint,5,opt,name=preferred_chunk,json=preferredChunk,proto3" json:"preferred_chunk,omitempty"`
+	Sha256         string                 `protobuf:"bytes,6,opt,name=sha256,proto3" json:"sha256,omitempty"` // 幂等性校验
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -241,6 +250,13 @@ func (x *CreateUploadSessionRequest) GetIdempotencyKey() string {
 func (x *CreateUploadSessionRequest) GetObjectId() string {
 	if x != nil {
 		return x.ObjectId
+	}
+	return ""
+}
+
+func (x *CreateUploadSessionRequest) GetFileName() string {
+	if x != nil {
+		return x.FileName
 	}
 	return ""
 }
@@ -410,29 +426,31 @@ var File_oss_v1_upload_session_proto protoreflect.FileDescriptor
 
 const file_oss_v1_upload_session_proto_rawDesc = "" +
 	"\n" +
-	"\x1boss/v1/upload_session.proto\x12\x06oss.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x9b\x03\n" +
+	"\x1boss/v1/upload_session.proto\x12\x06oss.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb8\x03\n" +
 	"\rUploadSession\x12\x1b\n" +
 	"\tobject_id\x18\x01 \x01(\tR\bobjectId\x12\x1b\n" +
 	"\tupload_id\x18\x02 \x01(\tR\buploadId\x12\x1b\n" +
-	"\tfile_size\x18\x03 \x01(\x04R\bfileSize\x12\x1d\n" +
+	"\tfile_name\x18\x03 \x01(\tR\bfileName\x12\x1b\n" +
+	"\tfile_size\x18\x04 \x01(\x04R\bfileSize\x12\x1d\n" +
 	"\n" +
-	"chunk_size\x18\x04 \x01(\rR\tchunkSize\x12\x16\n" +
-	"\x06offset\x18\x05 \x01(\x04R\x06offset\x123\n" +
-	"\x06status\x18\x06 \x01(\x0e2\x1b.oss.v1.UploadSessionStatusR\x06status\x12\x16\n" +
-	"\x06sha256\x18\a \x01(\tR\x06sha256\x129\n" +
+	"chunk_size\x18\x05 \x01(\rR\tchunkSize\x12\x16\n" +
+	"\x06offset\x18\x06 \x01(\x04R\x06offset\x123\n" +
+	"\x06status\x18\a \x01(\x0e2\x1b.oss.v1.UploadSessionStatusR\x06status\x12\x16\n" +
+	"\x06sha256\x18\b \x01(\tR\x06sha256\x129\n" +
 	"\n" +
-	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"created_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x129\n" +
+	"updated_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x129\n" +
 	"\n" +
-	"expires_at\x18\n" +
-	" \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xc0\x01\n" +
+	"expires_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xdd\x01\n" +
 	"\x1aCreateUploadSessionRequest\x12'\n" +
 	"\x0fidempotency_key\x18\x01 \x01(\tR\x0eidempotencyKey\x12\x1b\n" +
 	"\tobject_id\x18\x02 \x01(\tR\bobjectId\x12\x1b\n" +
-	"\tfile_size\x18\x03 \x01(\x04R\bfileSize\x12'\n" +
-	"\x0fpreferred_chunk\x18\x04 \x01(\rR\x0epreferredChunk\x12\x16\n" +
-	"\x06sha256\x18\x05 \x01(\tR\x06sha256\"6\n" +
+	"\tfile_name\x18\x03 \x01(\tR\bfileName\x12\x1b\n" +
+	"\tfile_size\x18\x04 \x01(\x04R\bfileSize\x12'\n" +
+	"\x0fpreferred_chunk\x18\x05 \x01(\rR\x0epreferredChunk\x12\x16\n" +
+	"\x06sha256\x18\x06 \x01(\tR\x06sha256\"6\n" +
 	"\x17GetUploadSessionRequest\x12\x1b\n" +
 	"\tupload_id\x18\x01 \x01(\tR\buploadId\"f\n" +
 	"\x1bCreateUploadSessionResponse\x12/\n" +

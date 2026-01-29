@@ -16,6 +16,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// 本版本含断点续传功能
+// 从服务器中下载文件 Download
 func main() {
 	addr := "127.0.0.1:8080"
 
@@ -31,37 +33,38 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	// 用户请求常量设定
 	const (
-		objectID  = "1.PNG"
+		objectID  = "gcc-master.zip"
 		hasEnd    = false
 		end       = uint64(0)  // hasEnd=false 时忽略
 		chunkSize = 256 * 1024 // 客户端期望 chunk 大小（服务端可 clamp）
-		outName   = "1.PNG"
+		outName   = "gcc-master.zip"
 		outDirRel = "static/downloads"
 	)
 
-	outDir := filepath.Clean(outDirRel)
+	outDir := filepath.Clean(outDirRel) // 清除输出目录路径的多余字符
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		log.Fatalf("could not create out dir: %v", err)
 	}
-	outPath := filepath.Join(outDir, outName)
+	outPath := filepath.Join(outDir, outName) // 获取最终输出路径
 
-	// 断点续传：不要用 O_TRUNC；需要读写权限以支持 WriteAt/Stat
-	file, err := os.OpenFile(outPath, os.O_CREATE|os.O_RDWR, 0600)
+	// 断点续传：不要用 O_TRUNC(若文件存在，则会先清空里面内容再写入新内容)；需要读写权限以支持 WriteAt/Stat
+	file, err := os.OpenFile(outPath, os.O_CREATE|os.O_RDWR, 0600) // 打开目标文件
 	if err != nil {
 		log.Fatalf("could not open file: %v", err)
 	}
 	defer file.Close()
 
 	// ===== 断点：以本地文件大小作为 startOffset =====
-	st, err := file.Stat()
+	st, err := file.Stat() // 获取目标文件元数据meta-data（即右键后的属性信息）
 	if err != nil {
 		log.Fatalf("stat failed: %v", err)
 	}
 
 	var start uint64
 	if st.Size() > 0 {
-		start = uint64(st.Size())
+		start = uint64(st.Size()) // 已有文件（之前下载过的一半）
 	} else {
 		start = 0 // 空文件很正常，代表从头开始
 	}

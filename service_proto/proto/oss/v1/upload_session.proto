@@ -16,25 +16,27 @@ enum UploadSessionStatus {
 message UploadSession {
   string object_id = 1;
   string upload_id = 2;
-  uint64 file_size = 3;
-  uint32 chunk_size = 4;
-  uint64 offset = 5;
-  UploadSessionStatus status = 6;
+  string file_name = 3;
+  uint64 file_size = 4;
+  uint32 chunk_size = 5;
+  uint64 offset = 6;
+  UploadSessionStatus status = 7;
 
-  string sha256 = 7; // 幂等匹配
-  google.protobuf.Timestamp created_at = 8;
-  google.protobuf.Timestamp updated_at = 9;
-  google.protobuf.Timestamp expires_at = 10;
+  string sha256 = 8; // 幂等匹配
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Timestamp expires_at = 11;
 }
 
 
 message CreateUploadSessionRequest {
   string idempotency_key = 1;
   string object_id = 2;
-  uint64 file_size = 3;
-  uint32  preferred_chunk = 4;
+  string file_name = 3;
+  uint64 file_size = 4;
+  uint32  preferred_chunk = 5;
 
-  string sha256 = 5; // 幂等性校验
+  string sha256 = 6; // 幂等性校验
 }
 
 message GetUploadSessionRequest {
