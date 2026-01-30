@@ -1,5 +1,6 @@
 // cmd/bench_upload/main.go
 /*
+================ sha256方案：上传完成后全文件扫盘校验 =====================
 2026/01/29 14:30:52 UPLOAD BENCH DONE
 2026/01/29 14:30:52   concurrency=100 file=256MiB chunk=262144B keep=false
 2026/01/29 14:30:52   success=100 fail=0 total_bytes=26843545600
@@ -9,6 +10,21 @@
 本地 loopback 环境下，256MiB 文件、chunk=256KiB、100 并发上传，聚合吞吐 ≈443 MiB/s
 单次 Upload RPC（端到端）p99 延迟 ≈57s，100% 请求成功，无内存泄漏
 上传完成后进行整文件 SHA256 校验并原子提交（rename + link），保证数据一致性
+
+================ sha256方案：流式写入在线增量计算 + 断线续传前缀补算 =====================
+2026/01/30 21:12:28 UPLOAD BENCH DONE
+2026/01/30 21:12:28   concurrency=100 file=256MiB chunk=262144B keep=false
+2026/01/30 21:12:28   success=100 fail=0 total_bytes=26843545600
+2026/01/30 21:12:28   aggregate_throughput=1916.01 MiB/s
+2026/01/30 21:12:28   p99_latency=12706 ms (end-to-end RPC)
+
+本地环境 100 并发上传 256MiB 文件，chunk=256KiB，错误率 0%；上传聚合吞吐 1916 MiB/s，端到端 p99=12.7s。
+通过将 SHA256 从“完成后全文件扫盘校验”优化为“流式写入在线增量计算 + 断线续传前缀补算”，并将 WriteAt 改为顺序 Write、降低 session 锁更新频率，使吞吐提升 4.3×、p99 降低 77.8%。
+
+chunk	aggregate throughput	p99 latency
+256KiB	1916.01 MiB/s	12.706 s
+512KiB	2219.48 MiB/s	11.193 s
+1MiB	2484.34 MiB/s	9.949 s
 */
 package main
 
@@ -40,7 +56,7 @@ func main() {
 	var (
 		addr     = flag.String("addr", "127.0.0.1:8080", "gRPC server address")
 		con      = flag.Int("c", 100, "concurrency")
-		chunk    = flag.Int("chunk", 256*1024, "preferred chunk size")
+		chunk    = flag.Int("chunk", 1024*1024, "preferred chunk size")
 		timeout  = flag.Duration("timeout", 15*time.Minute, "overall timeout")
 		keep     = flag.Bool("keep", false, "keep uploaded objects on disk (default false)")
 		filePath = flag.String("file", "/Users/aureate7/Downloads/gcc-master.zip", "source file path (will be created if not exists)")

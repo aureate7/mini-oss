@@ -214,6 +214,217 @@ func sanitizeFileName(name string) string {
 func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 	ctx := stream.Context()
 
+	// ===================== 1. Recv 第一帧，做基础校验 =====================
+	first, err := stream.Recv()
+	if err != nil {
+		if err == io.EOF {
+			return status.Error(codes.InvalidArgument, "empty upload stream")
+		}
+		return status.Error(codes.Unknown, "recv first chunk failed: "+err.Error())
+	}
+
+	uploadId := first.GetUploadId()
+	if uploadId == "" {
+		return status.Error(codes.InvalidArgument, "empty upload id")
+	}
+	if len(first.GetPayload()) == 0 {
+		return status.Error(codes.InvalidArgument, "empty upload payload")
+	}
+
+	// ===================== 2. 获取 UploadSession =====================
+	if u.sess == nil {
+		return status.Error(codes.Internal, "session service not initialized")
+	}
+	sess, err := u.sess.getSessionByUploadID(uploadId)
+	if err != nil {
+		return err
+	}
+
+	// ===================== 3. 准备目录与文件路径 =====================
+	objectsDir := filepath.Join("static", "objects")
+	indexDir := filepath.Join("static", "index")
+	if err := os.MkdirAll(objectsDir, 0o755); err != nil {
+		return status.Error(codes.Internal, "mkdir objects dir failed")
+	}
+	if err := os.MkdirAll(indexDir, 0o755); err != nil {
+		return status.Error(codes.Internal, "mkdir index dir failed")
+	}
+
+	safeName := sanitizeFileName(sess.FileName)
+	ext := filepath.Ext(safeName)
+	stem := strings.TrimSuffix(safeName, ext)
+
+	finalName := fmt.Sprintf("%s_%s_%s%s", sess.ObjectId, stem, sess.UploadID, ext)
+	finalPath := filepath.Join(objectsDir, finalName)
+
+	tmpName := fmt.Sprintf("%s_%s.part.%s%s", sess.ObjectId, stem, sess.UploadID, ext)
+	tmpPath := filepath.Join(objectsDir, tmpName)
+
+	indexPath := filepath.Join(indexDir, sess.ObjectId)
+
+	// ===================== 4. 打开/准备临时文件 =====================
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return status.Error(codes.Internal, "open temp file failed: "+err.Error())
+	}
+	defer f.Close()
+
+	// 【修改点①】仅在必要时 truncate，避免续传时重复 truncate
+	if st, err := f.Stat(); err == nil {
+		if st.Size() != int64(sess.FileSize) {
+			if err := f.Truncate(int64(sess.FileSize)); err != nil {
+				return status.Error(codes.Internal, "truncate file failed: "+err.Error())
+			}
+		}
+	} else {
+		if err := f.Truncate(int64(sess.FileSize)); err != nil {
+			return status.Error(codes.Internal, "truncate file failed: "+err.Error())
+		}
+	}
+
+	// ===================== 5. 初始化 expected offset 与 sha256 =====================
+	expected := uint64(sess.UploadedOffset)
+	hasher := sha256.New()
+
+	// 【修改点②】断线重连续传：补算前缀 hash（只算已上传部分）
+	if expected > 0 {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return status.Error(codes.Internal, "seek prefix failed: "+err.Error())
+		}
+		if _, err := io.CopyN(hasher, f, int64(expected)); err != nil {
+			return status.Error(codes.Internal, "sha256 prefix calc failed: "+err.Error())
+		}
+	}
+
+	// 【修改点③】顺序写：Seek 到 expected，后续使用 Write（而不是 WriteAt）
+	if _, err := f.Seek(int64(expected), io.SeekStart); err != nil {
+		return status.Error(codes.Internal, "seek write start failed: "+err.Error())
+	}
+
+	// ===================== 6. 定义 chunk 处理逻辑 =====================
+	var lastUpdate uint64
+
+	handleChunk := func(ch *ossv1.UploadChunk) error {
+		if ctx.Err() != nil {
+			return status.Error(codes.Canceled, "request canceled")
+		}
+		if ch.GetUploadId() != uploadId {
+			return status.Error(codes.InvalidArgument, "mixed upload_id in stream")
+		}
+
+		payload := ch.GetPayload()
+		if len(payload) == 0 {
+			return status.Error(codes.InvalidArgument, "empty upload payload")
+		}
+		if sess.ChunkSize > 0 && uint32(len(payload)) > sess.ChunkSize {
+			return status.Errorf(codes.InvalidArgument, "chunk too large")
+		}
+
+		// CRC32 校验（可选）
+		if ch.GetChecksum32() != 0 {
+			if crc32.ChecksumIEEE(payload) != ch.GetChecksum32() {
+				return status.Error(codes.DataLoss, "chunk checksum mismatch")
+			}
+		}
+
+		off := ch.GetOffset()
+
+		// 幂等：重复 chunk 直接忽略
+		if off < expected {
+			return nil
+		}
+		// 顺序约束
+		if off > expected {
+			return status.Errorf(codes.FailedPrecondition, "unexpected offset: %d != %d", off, expected)
+		}
+
+		// 【修改点④】顺序写 + 在线 hash
+		n, err := f.Write(payload)
+		if err != nil {
+			return status.Error(codes.Internal, "write failed: "+err.Error())
+		}
+		if n != len(payload) {
+			return status.Error(codes.Internal, "short write")
+		}
+		_, _ = hasher.Write(payload)
+
+		expected += uint64(n)
+
+		// 【修改点⑤】session offset 更新降频（减少锁竞争）
+		if expected-lastUpdate >= 4*1024*1024 || ch.GetIsLast() {
+			u.sess.mu.Lock()
+			if expected > sess.UploadedOffset {
+				sess.UploadedOffset = expected
+				sess.UpdateTime = time.Now()
+			}
+			u.sess.mu.Unlock()
+			lastUpdate = expected
+		}
+
+		if ch.GetIsLast() && expected != sess.FileSize {
+			return status.Errorf(codes.FailedPrecondition,
+				"expected file size %d, got %d", sess.FileSize, expected)
+		}
+		return nil
+	}
+
+	// ===================== 7. 处理第一帧 + 后续帧 =====================
+	if err := handleChunk(first); err != nil {
+		return err
+	}
+
+	for {
+		ch, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return status.Error(codes.Unknown, "recv chunk failed: "+err.Error())
+		}
+		if err := handleChunk(ch); err != nil {
+			return err
+		}
+		if ch.GetIsLast() && expected == sess.FileSize {
+			break
+		}
+	}
+
+	// ===================== 8. 完整性校验 =====================
+	if expected != sess.FileSize {
+		return status.Errorf(codes.FailedPrecondition,
+			"upload incomplete: %d/%d", expected, sess.FileSize)
+	}
+
+	// 【修改点⑥】不再扫全盘，直接使用在线 sha256
+	finalSha := hex.EncodeToString(hasher.Sum(nil))
+	if sess.Sha256 != "" && finalSha != sess.Sha256 {
+		return status.Error(codes.DataLoss, "file sha256 mismatch")
+	}
+
+	// ===================== 9. 原子提交 + 建立索引 =====================
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return status.Error(codes.Internal, "rename failed: "+err.Error())
+	}
+	_ = os.Remove(indexPath)
+	target := filepath.Join("..", "objects", finalName)
+	if err := os.Symlink(target, indexPath); err != nil {
+		return status.Error(codes.Internal, "symlink failed: "+err.Error())
+	}
+
+	// ===================== 10. 返回结果 =====================
+	return stream.SendAndClose(&ossv1.UploadFileResult{
+		ObjectId:    sess.ObjectId,
+		UploadId:    sess.UploadID,
+		Size:        sess.FileSize,
+		Sha256:      finalSha,
+		CompletedAt: timestamppb.New(time.Now()),
+	})
+}
+
+func (u *UploadOss) Upload_back(stream ossv1.UploadService_UploadServer) error {
+	ctx := stream.Context()
+
+	// ===================== 1. Recv 第一帧，做基础校验 =====================
 	// 1) 先Recv第一帧，用它做强校验+绑定session
 	first, err := stream.Recv()
 	if err != nil {
@@ -234,6 +445,7 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 		return status.Error(codes.InvalidArgument, "empty upload payload")
 	}
 
+	// ===================== 2. 获取 UploadSession =====================
 	// 2) 通过upload_id找session (upload不负责创建session)
 	if u.sess == nil {
 		return status.Error(codes.Internal, "session service not initialized")
@@ -263,6 +475,7 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 	//if err := os.MkdirAll(baseDir, 0o755); err != nil {
 	//	return status.Error(codes.Internal, "mkdir failed: "+err.Error())
 	//}
+	// ===================== 3. 准备目录与文件路径 =====================
 	objectsDir := filepath.Join("static", "objects")
 	indexDir := filepath.Join("static", "index")
 	if err := os.MkdirAll(objectsDir, 0o755); err != nil {
@@ -287,6 +500,7 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 	// 索引入口：static/index/<object_id> (syslink -> ../objects/<finalName>)
 	indexPath := filepath.Join(indexDir, sess.ObjectId)
 
+	// ===================== 4. 打开/准备临时文件 =====================
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR, 0o644) // 0o八进制
 	if err != nil {
 		return status.Error(codes.Internal, "open file failed: "+err.Error())
@@ -294,15 +508,46 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 	defer f.Close()
 
 	// 预分配文件大小：提前暴露磁盘空间问题，减少碎片
-	if sess.FileSize > 0 {
+	// 只有新文件 or 大小不对时才会truncate，更稳定
+	if st, err := f.Stat(); err == nil {
+		if st.Size() != int64(sess.FileSize) {
+			if err := f.Truncate(int64(sess.FileSize)); err != nil {
+				return status.Error(codes.Internal, "truncate file failed_1: "+err.Error())
+			}
+		}
+	} else {
 		if err := f.Truncate(int64(sess.FileSize)); err != nil {
-			return status.Error(codes.Internal, "truncate file failed: "+err.Error())
+			return status.Error(codes.Internal, "truncate file failed_2: "+err.Error())
 		}
 	}
 
+	// v1
+	//if sess.FileSize > 0 {
+	//	if err := f.Truncate(int64(sess.FileSize)); err != nil {
+	//		return status.Error(codes.Internal, "truncate file failed: "+err.Error())
+	//	}
+	//}
+
+	// ===================== 5. 初始化 expected offset 与 sha256 =====================
 	// 4) 以session的uploadedOffset作为最终进度
 	expected := uint64(sess.UploadedOffset)
+	hasher := sha256.New()
+	// 断点续传（优化版）：补算前缀hash（只算已上传部分）
+	if expected > 0 {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return status.Error(codes.Internal, "seek prefix failed: "+err.Error())
+		}
+		if _, err := io.CopyN(hasher, f, int64(expected)); err != nil {
+			return status.Error(codes.Internal, "sha256 prefix calc failed: "+err.Error())
+		}
+	}
+	// 顺序写：Seek到expected，后续使用Write（而不是WriteAt）
+	if _, err := f.Seek(int64(expected), io.SeekStart); err != nil {
+		return status.Error(codes.Internal, "seek write start failed: "+err.Error())
+	}
 
+	// ===================== 6. 定义 chunk 处理逻辑 =====================
+	var lastUpdate uint64
 	// 函数定义：处理每个chunk：校验offset -> crc32(可选) -> 写入 -> 更新expected/session
 	handleChunk := func(ch *ossv1.UploadChunk) error {
 		// cancel/time out
@@ -340,24 +585,47 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 			return status.Errorf(codes.FailedPrecondition, "unexpected offset: got=%d expected=%d", off, expected)
 		}
 
-		// off == expected: 写入
-		n, werr := f.WriteAt(payload, int64(off))
-		if werr != nil {
-			return status.Error(codes.Internal, "write chunk failed: "+werr.Error())
+		// 顺序写 + 在线hash
+		n, err := f.Write(payload)
+		if err != nil {
+			return status.Error(codes.Internal, "write chunk failed: "+err.Error())
 		}
 		if n != len(payload) {
-			return status.Errorf(codes.Internal, "short write chunk: got=%d expected=%d", n, len(payload))
+			return status.Error(codes.Internal, "short write chunk")
 		}
+		_, _ = hasher.Write(payload)
 
 		expected += uint64(n)
 
-		// 更新session 高并发加锁
-		u.sess.mu.Lock()
-		if expected > sess.UploadedOffset {
-			sess.UploadedOffset = expected
-			sess.UpdateTime = time.Now()
+		// session offset 更新降频（减少锁竞争） 上传更新超过4MB(4*1024*1024)才更新session
+		if expected-lastUpdate >= 4*1024*1024 || ch.GetIsLast() {
+			u.sess.mu.Lock()
+			if expected > sess.UploadedOffset {
+				sess.UploadedOffset = expected
+				sess.UpdateTime = time.Now()
+			}
+			u.sess.mu.Unlock()
+			lastUpdate = expected
 		}
-		u.sess.mu.Unlock()
+
+		// off == expected: 写入
+		//n, werr := f.WriteAt(payload, int64(off))
+		//if werr != nil {
+		//	return status.Error(codes.Internal, "write chunk failed: "+werr.Error())
+		//}
+		//if n != len(payload) {
+		//	return status.Errorf(codes.Internal, "short write chunk: got=%d expected=%d", n, len(payload))
+		//}
+		//
+		//expected += uint64(n)
+		//
+		//// 更新session 高并发加锁
+		//u.sess.mu.Lock()
+		//if expected > sess.UploadedOffset {
+		//	sess.UploadedOffset = expected
+		//	sess.UpdateTime = time.Now()
+		//}
+		//u.sess.mu.Unlock()
 
 		// is_last 校验：声明最后一块时，必须刚好到file_size
 		if ch.GetIsLast() {
@@ -371,6 +639,7 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 		return nil
 	} // end of handleChunk
 
+	// ===================== 7. 处理第一帧 + 后续帧 =====================
 	// 先处理第一帧
 	if err := handleChunk(first); err != nil {
 		return err
@@ -400,24 +669,32 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 		}
 	}
 
+	// ===================== 8. 完整性校验 =====================
 	// 6) 完成一致性：必须完整写入
 	if sess.FileSize > 0 && expected != sess.FileSize {
 		return status.Errorf(codes.FailedPrecondition, "upload incomplete: uploaded=%d total=%d", expected, sess.FileSize)
 	}
 
-	// 7) 整体SHA256校验 与session期望值对比
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return status.Error(codes.Internal, "seek failed: "+err.Error())
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return status.Error(codes.Internal, "sha256 calc failed: "+err.Error())
-	}
-	finalSha := hex.EncodeToString(h.Sum(nil))
+	// sha256优化：在线sha256
+	finalSha := hex.EncodeToString(hasher.Sum(nil))
 	if sess.Sha256 != "" && finalSha != sess.Sha256 {
-		return status.Error(codes.DataLoss, "file sha256 mismatch")
+		return status.Error(codes.DataLoss, "sha256 checksum mismatch")
 	}
 
+	// 7) 整体SHA256校验 与session期望值对比 「主要的尾部延迟开销，需要优化」
+	//if _, err := f.Seek(0, io.SeekStart); err != nil {
+	//	return status.Error(codes.Internal, "seek failed: "+err.Error())
+	//}
+	//h := sha256.New()
+	//if _, err := io.Copy(h, f); err != nil {
+	//	return status.Error(codes.Internal, "sha256 calc failed: "+err.Error())
+	//}
+	//finalSha := hex.EncodeToString(h.Sum(nil))
+	//if sess.Sha256 != "" && finalSha != sess.Sha256 {
+	//	return status.Error(codes.DataLoss, "file sha256 mismatch")
+	//}
+
+	// ===================== 9. 原子提交 + 建立索引 =====================
 	// 8) 原子提交：rename临时文件为最终文件(同目录，rename原子)
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return status.Error(codes.Internal, "rename failed: "+err.Error())
@@ -433,6 +710,7 @@ func (u *UploadOss) Upload(stream ossv1.UploadService_UploadServer) error {
 		return status.Error(codes.Internal, "symlink failed: "+err.Error())
 	}
 
+	// ===================== 10. 返回结果 =====================
 	// 9) 返回结果
 	resp := &ossv1.UploadFileResult{
 		ObjectId:    sess.ObjectId,
